@@ -6,6 +6,7 @@ from __future__ import unicode_literals
 import logging
 import re
 import smtplib
+import requests
 import sys
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -32,6 +33,11 @@ smtp_tls = environ.get("SMTP_TLS", "").lower() in {"1", "true"}
 from_ = environ.get("EMAIL_FROM")
 to = environ.get("EMAIL_TO")
 subject = environ.get("EMAIL_SUBJECT")
+
+# Get REST settings
+rest_endpoint = environ.get("REST_ENDPOINT")
+rest_json = environ.get("REST_JSON")
+rest_always = environ.get("REST_ALWAYS").lower() in {"1", "true"}
 
 # Get the commands we need to run
 to_run = {}
@@ -76,7 +82,7 @@ for njob, command in sorted(to_run.items()):
     message += log
 
 
-# Report results
+# SMTP reporting
 if all((smtp_host, smtp_port, from_, to, subject)):
     logging.info("Sending email report")
     smtp = None
@@ -107,8 +113,49 @@ if all((smtp_host, smtp_port, from_, to, subject)):
     finally:
         if smtp is not None:
             smtp.quit()
-else:
-    logging.info("Finished")
+
+def rest_extract_dict(infix):
+    d = {}
+    for kname, kvalue in environ.items():
+        match = re.match(f"^REST_{infix}_K_(.+)$", kname)
+        if match:
+            suffix = match.group(1)
+            vname = f"REST_{infix}_V_{suffix}"
+            rest_key = kvalue
+            rest_value = environ.get(vname)
+            if rest_value is None and infix == "PLD" and suffix == "MESSAGE":
+                rest_value = "\n".join(message)
+            if rest_key == "":
+                logging.warning(f"{kname} empty, ignoring {suffix}")
+                continue
+            elif rest_value is None:
+                logging.warning(f"{vname} unset but {kname} set, ignoring {suffix}")
+                continue
+            else:
+                d[rest_key] = rest_value
+
+    for vname, vvalue in environ.items():
+        match = re.match(f"^REST_{infix}_V_(.+)$", vname)
+        if match:
+            suffix = match.group(1)
+            kname = f"REST_{infix}_K_{suffix}"
+            rest_key = environ.get(kname)
+            if rest_key is None:
+                logging.warning(f"{kname} unset but {vname} set, ignoring {suffix}")
+                continue
+
+    return d
+
+# REST reporting
+if all((rest_always or failed, rest_endpoint)):
+    payload = rest_extract_dict("PLD")
+    headers = rest_extract_dict("HDR")
+    if rest_json:
+        response = requests.post(rest_endpoint, json=payload, headers=headers)
+    else:
+        response = requests.post(rest_endpoint, data=payload, headers=headers)
+
+logging.info("Finished")
 
 if failed:
     sys.exit("At least one job failed")
